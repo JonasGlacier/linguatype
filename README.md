@@ -54,5 +54,5 @@ Both hotkeys and languages are fully customizable in Settings → Hotkeys.
 
 ```bash
 pip install pyinstaller
-pyinstaller --onefile --windowed --icon=assets/icon.ico main.py
+python -m PyInstaller --onefile --windowed --name LinguaType --icon=assets/icon.ico --add-data "assets;assets" main.py
 ```
