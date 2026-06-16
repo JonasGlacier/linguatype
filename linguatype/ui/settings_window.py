@@ -10,9 +10,12 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import requests
+
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QFont, QIcon, QKeySequence, QPalette, QColor
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QDialogButtonBox,
     QTabWidget,
@@ -72,6 +75,142 @@ _LANGUAGES: list[tuple[str, str]] = [
 _LANG_CODE_TO_NAME = {code: name for code, name in _LANGUAGES}
 _LANG_NAME_TO_CODE = {name: code for code, name in _LANGUAGES}
 
+_ENGINE_DEFAULT_MODELS: dict[str, str] = {
+    "openai": "gpt-4o-mini",
+    "anthropic": "claude-3-5-sonnet-latest",
+    "gemini": "gemini-1.5-flash",
+    "grok": "grok-2",
+    "openrouter": "google/gemini-2.5-flash",
+}
+
+
+def _extract_error_message(resp: requests.Response) -> str:
+    try:
+        payload = resp.json()
+    except Exception:
+        return resp.text.strip() or f"HTTP {resp.status_code}"
+
+    if isinstance(payload, dict):
+        err = payload.get("error")
+        if isinstance(err, dict):
+            if isinstance(err.get("message"), str):
+                return err["message"]
+        if isinstance(err, str):
+            return err
+        if isinstance(payload.get("message"), str):
+            return payload["message"]
+    return f"HTTP {resp.status_code}"
+
+
+def _fetch_models(engine: str, api_key: str) -> list[str]:
+    timeout = 15
+    headers = {"Content-Type": "application/json"}
+
+    if engine == "openai":
+        headers["Authorization"] = f"Bearer {api_key}"
+        resp = requests.get("https://api.openai.com/v1/models", headers=headers, timeout=timeout)
+        if resp.status_code >= 400:
+            raise RuntimeError(_extract_error_message(resp))
+        data = resp.json().get("data", [])
+        models = sorted(
+            item.get("id", "")
+            for item in data
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        )
+        return [m for m in models if m]
+
+    if engine == "anthropic":
+        headers = {
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        }
+        resp = requests.get("https://api.anthropic.com/v1/models", headers=headers, timeout=timeout)
+        if resp.status_code >= 400:
+            raise RuntimeError(_extract_error_message(resp))
+        data = resp.json().get("data", [])
+        return [
+            item.get("id", "")
+            for item in data
+            if isinstance(item, dict) and isinstance(item.get("id"), str) and item.get("id")
+        ]
+
+    if engine == "gemini":
+        resp = requests.get(
+            "https://generativelanguage.googleapis.com/v1beta/models",
+            params={"key": api_key},
+            timeout=timeout,
+        )
+        if resp.status_code >= 400:
+            raise RuntimeError(_extract_error_message(resp))
+        models = []
+        for item in resp.json().get("models", []):
+            if not isinstance(item, dict):
+                continue
+            methods = item.get("supportedGenerationMethods", [])
+            if "generateContent" not in methods:
+                continue
+            raw_name = item.get("name", "")
+            if isinstance(raw_name, str) and raw_name.startswith("models/"):
+                models.append(raw_name.split("/", 1)[1])
+        return sorted(set(models))
+
+    if engine == "grok":
+        headers["Authorization"] = f"Bearer {api_key}"
+        resp = requests.get("https://api.x.ai/v1/models", headers=headers, timeout=timeout)
+        if resp.status_code >= 400:
+            raise RuntimeError(_extract_error_message(resp))
+        data = resp.json().get("data", [])
+        return sorted(
+            item.get("id", "")
+            for item in data
+            if isinstance(item, dict) and isinstance(item.get("id"), str) and item.get("id")
+        )
+
+    if engine == "openrouter":
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "HTTP-Referer": "https://github.com/LinguaType/LinguaType",
+            "X-Title": "LinguaType",
+        }
+        resp = requests.get("https://openrouter.ai/api/v1/models", headers=headers, timeout=timeout)
+        if resp.status_code >= 400:
+            raise RuntimeError(_extract_error_message(resp))
+        data = resp.json().get("data", [])
+        return sorted(
+            item.get("id", "")
+            for item in data
+            if isinstance(item, dict) and isinstance(item.get("id"), str) and item.get("id")
+        )
+
+    raise RuntimeError(f"Model fetching not supported for engine: {engine}")
+
+
+def _verify_api_key(engine: str, api_key: str) -> tuple[bool, str]:
+    if not api_key.strip():
+        return False, "API key is empty."
+    try:
+        if engine == "openrouter":
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "HTTP-Referer": "https://github.com/LinguaType/LinguaType",
+                "X-Title": "LinguaType",
+            }
+            resp = requests.get("https://openrouter.ai/api/v1/key", headers=headers, timeout=12)
+            if resp.status_code >= 400:
+                return False, _extract_error_message(resp)
+            return True, "API key is valid."
+
+        models = _fetch_models(engine, api_key)
+        if not models:
+            return False, "API key worked, but no models were returned."
+        return True, "API key is valid."
+    except requests.RequestException as exc:
+        return False, f"Network error: {exc}"
+    except RuntimeError as exc:
+        return False, str(exc)
+    except Exception as exc:
+        return False, f"Unexpected error: {exc}"
+
 
 # ---------------------------------------------------------------------------
 # Hotkey capture widget
@@ -111,6 +250,8 @@ class _EngineTab(QWidget):
     def __init__(self, cfg: Config, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._cfg = cfg
+        self._verified_keys: dict[str, str] = {}
+        self._engine_controls: dict[str, dict[str, QWidget]] = {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
@@ -181,14 +322,21 @@ class _EngineTab(QWidget):
         self._openai_key.setEchoMode(QLineEdit.EchoMode.Password)
         self._openai_key.setPlaceholderText("Paste your OpenAI API key here")
 
-        self._openai_model = QLineEdit()
-        self._openai_model.setPlaceholderText("gpt-4o-mini")
+        self._openai_model = QComboBox()
+        self._openai_model.addItem(_ENGINE_DEFAULT_MODELS["openai"])
 
         openai_row = QHBoxLayout()
         openai_row.addWidget(self._openai_key)
         openai_link = QLabel('<a href="https://platform.openai.com/api-keys">Get key</a>')
         openai_link.setOpenExternalLinks(True)
         openai_row.addWidget(openai_link)
+        self._openai_verify_btn = QPushButton("Verify")
+        self._openai_fetch_btn = QPushButton("Fetch")
+        self._openai_status = QLabel("")
+        self._openai_status.setVisible(False)
+        openai_row.addWidget(self._openai_verify_btn)
+        openai_row.addWidget(self._openai_fetch_btn)
+        openai_row.addWidget(self._openai_status)
 
         pg_openai_layout.addRow("OpenAI API key:", openai_row)
         pg_openai_layout.addRow("OpenAI model:", self._openai_model)
@@ -203,14 +351,21 @@ class _EngineTab(QWidget):
         self._anthropic_key.setEchoMode(QLineEdit.EchoMode.Password)
         self._anthropic_key.setPlaceholderText("Paste your Anthropic API key here")
 
-        self._anthropic_model = QLineEdit()
-        self._anthropic_model.setPlaceholderText("claude-3-5-sonnet-latest")
+        self._anthropic_model = QComboBox()
+        self._anthropic_model.addItem(_ENGINE_DEFAULT_MODELS["anthropic"])
 
         anthropic_row = QHBoxLayout()
         anthropic_row.addWidget(self._anthropic_key)
         anthropic_link = QLabel('<a href="https://console.anthropic.com/">Get key</a>')
         anthropic_link.setOpenExternalLinks(True)
         anthropic_row.addWidget(anthropic_link)
+        self._anthropic_verify_btn = QPushButton("Verify")
+        self._anthropic_fetch_btn = QPushButton("Fetch")
+        self._anthropic_status = QLabel("")
+        self._anthropic_status.setVisible(False)
+        anthropic_row.addWidget(self._anthropic_verify_btn)
+        anthropic_row.addWidget(self._anthropic_fetch_btn)
+        anthropic_row.addWidget(self._anthropic_status)
 
         pg_anthropic_layout.addRow("Anthropic API key:", anthropic_row)
         pg_anthropic_layout.addRow("Anthropic model:", self._anthropic_model)
@@ -225,14 +380,21 @@ class _EngineTab(QWidget):
         self._gemini_key.setEchoMode(QLineEdit.EchoMode.Password)
         self._gemini_key.setPlaceholderText("Paste your Google Gemini API key here")
 
-        self._gemini_model = QLineEdit()
-        self._gemini_model.setPlaceholderText("gemini-1.5-flash")
+        self._gemini_model = QComboBox()
+        self._gemini_model.addItem(_ENGINE_DEFAULT_MODELS["gemini"])
 
         gemini_row = QHBoxLayout()
         gemini_row.addWidget(self._gemini_key)
         gemini_link = QLabel('<a href="https://aistudio.google.com/">Get key</a>')
         gemini_link.setOpenExternalLinks(True)
         gemini_row.addWidget(gemini_link)
+        self._gemini_verify_btn = QPushButton("Verify")
+        self._gemini_fetch_btn = QPushButton("Fetch")
+        self._gemini_status = QLabel("")
+        self._gemini_status.setVisible(False)
+        gemini_row.addWidget(self._gemini_verify_btn)
+        gemini_row.addWidget(self._gemini_fetch_btn)
+        gemini_row.addWidget(self._gemini_status)
 
         pg_gemini_layout.addRow("Gemini API key:", gemini_row)
         pg_gemini_layout.addRow("Gemini model:", self._gemini_model)
@@ -247,14 +409,21 @@ class _EngineTab(QWidget):
         self._grok_key.setEchoMode(QLineEdit.EchoMode.Password)
         self._grok_key.setPlaceholderText("Paste your xAI Grok API key here")
 
-        self._grok_model = QLineEdit()
-        self._grok_model.setPlaceholderText("grok-2")
+        self._grok_model = QComboBox()
+        self._grok_model.addItem(_ENGINE_DEFAULT_MODELS["grok"])
 
         grok_row = QHBoxLayout()
         grok_row.addWidget(self._grok_key)
         grok_link = QLabel('<a href="https://console.x.ai/">Get key</a>')
         grok_link.setOpenExternalLinks(True)
         grok_row.addWidget(grok_link)
+        self._grok_verify_btn = QPushButton("Verify")
+        self._grok_fetch_btn = QPushButton("Fetch")
+        self._grok_status = QLabel("")
+        self._grok_status.setVisible(False)
+        grok_row.addWidget(self._grok_verify_btn)
+        grok_row.addWidget(self._grok_fetch_btn)
+        grok_row.addWidget(self._grok_status)
 
         pg_grok_layout.addRow("Grok API key:", grok_row)
         pg_grok_layout.addRow("Grok model:", self._grok_model)
@@ -269,18 +438,71 @@ class _EngineTab(QWidget):
         self._openrouter_key.setEchoMode(QLineEdit.EchoMode.Password)
         self._openrouter_key.setPlaceholderText("Paste your OpenRouter API key here")
 
-        self._openrouter_model = QLineEdit()
-        self._openrouter_model.setPlaceholderText("google/gemini-2.5-flash")
+        self._openrouter_model = QComboBox()
+        self._openrouter_model.addItem(_ENGINE_DEFAULT_MODELS["openrouter"])
 
         openrouter_row = QHBoxLayout()
         openrouter_row.addWidget(self._openrouter_key)
         openrouter_link = QLabel('<a href="https://openrouter.ai/keys">Get key</a>')
         openrouter_link.setOpenExternalLinks(True)
         openrouter_row.addWidget(openrouter_link)
+        self._openrouter_verify_btn = QPushButton("Verify")
+        self._openrouter_fetch_btn = QPushButton("Fetch")
+        self._openrouter_status = QLabel("")
+        self._openrouter_status.setVisible(False)
+        openrouter_row.addWidget(self._openrouter_verify_btn)
+        openrouter_row.addWidget(self._openrouter_fetch_btn)
+        openrouter_row.addWidget(self._openrouter_status)
 
         pg_openrouter_layout.addRow("OpenRouter API key:", openrouter_row)
         pg_openrouter_layout.addRow("OpenRouter model:", self._openrouter_model)
         self._stacked.addWidget(pg_openrouter)
+
+        self._engine_controls = {
+            "openai": {
+                "key": self._openai_key,
+                "model": self._openai_model,
+                "verify": self._openai_verify_btn,
+                "fetch": self._openai_fetch_btn,
+                "status": self._openai_status,
+            },
+            "anthropic": {
+                "key": self._anthropic_key,
+                "model": self._anthropic_model,
+                "verify": self._anthropic_verify_btn,
+                "fetch": self._anthropic_fetch_btn,
+                "status": self._anthropic_status,
+            },
+            "gemini": {
+                "key": self._gemini_key,
+                "model": self._gemini_model,
+                "verify": self._gemini_verify_btn,
+                "fetch": self._gemini_fetch_btn,
+                "status": self._gemini_status,
+            },
+            "grok": {
+                "key": self._grok_key,
+                "model": self._grok_model,
+                "verify": self._grok_verify_btn,
+                "fetch": self._grok_fetch_btn,
+                "status": self._grok_status,
+            },
+            "openrouter": {
+                "key": self._openrouter_key,
+                "model": self._openrouter_model,
+                "verify": self._openrouter_verify_btn,
+                "fetch": self._openrouter_fetch_btn,
+                "status": self._openrouter_status,
+            },
+        }
+
+        for engine_name, controls in self._engine_controls.items():
+            key_edit = controls["key"]
+            verify_btn = controls["verify"]
+            fetch_btn = controls["fetch"]
+            key_edit.textChanged.connect(lambda _text, e=engine_name: self._on_key_changed(e))
+            verify_btn.clicked.connect(lambda _checked=False, e=engine_name: self._on_verify_clicked(e))
+            fetch_btn.clicked.connect(lambda _checked=False, e=engine_name: self._on_fetch_clicked(e))
 
         # Connect radio buttons
         self._rb_google.toggled.connect(lambda checked: self._stacked.setCurrentIndex(0) if checked else None)
@@ -317,15 +539,97 @@ class _EngineTab(QWidget):
 
         self._deepl_key.setText(self._cfg.api_keys.deepl)
         self._openai_key.setText(self._cfg.api_keys.openai)
-        self._openai_model.setText(self._cfg.api_keys.openai_model or "gpt-4o-mini")
+        self._set_model_value("openai", self._cfg.api_keys.openai_model or _ENGINE_DEFAULT_MODELS["openai"])
         self._anthropic_key.setText(self._cfg.api_keys.anthropic)
-        self._anthropic_model.setText(self._cfg.api_keys.anthropic_model or "claude-3-5-sonnet-latest")
+        self._set_model_value("anthropic", self._cfg.api_keys.anthropic_model or _ENGINE_DEFAULT_MODELS["anthropic"])
         self._gemini_key.setText(self._cfg.api_keys.gemini)
-        self._gemini_model.setText(self._cfg.api_keys.gemini_model or "gemini-1.5-flash")
+        self._set_model_value("gemini", self._cfg.api_keys.gemini_model or _ENGINE_DEFAULT_MODELS["gemini"])
         self._grok_key.setText(self._cfg.api_keys.grok)
-        self._grok_model.setText(self._cfg.api_keys.grok_model or "grok-2")
+        self._set_model_value("grok", self._cfg.api_keys.grok_model or _ENGINE_DEFAULT_MODELS["grok"])
         self._openrouter_key.setText(self._cfg.api_keys.openrouter)
-        self._openrouter_model.setText(self._cfg.api_keys.openrouter_model or "google/gemini-2.5-flash")
+        self._set_model_value("openrouter", self._cfg.api_keys.openrouter_model or _ENGINE_DEFAULT_MODELS["openrouter"])
+
+    def _set_model_value(self, engine: str, model_name: str) -> None:
+        combo = self._engine_controls[engine]["model"]
+        idx = combo.findText(model_name)
+        if idx < 0:
+            combo.addItem(model_name)
+            idx = combo.findText(model_name)
+        combo.setCurrentIndex(idx)
+
+    def _on_key_changed(self, engine: str) -> None:
+        self._verified_keys.pop(engine, None)
+        self._set_status(engine, text="Not verified", ok=False, visible=False)
+
+    def _set_status(self, engine: str, text: str, ok: bool, visible: bool = True) -> None:
+        status = self._engine_controls[engine]["status"]
+        status.setText(text)
+        status.setVisible(visible)
+        if not visible:
+            return
+        color = "#2e7d32" if ok else "#c62828"
+        status.setStyleSheet(f"color: {color}; font-weight: 600;")
+
+    def _with_controls_enabled(self, engine: str, enabled: bool) -> None:
+        self._engine_controls[engine]["verify"].setEnabled(enabled)
+        self._engine_controls[engine]["fetch"].setEnabled(enabled)
+
+    def _on_verify_clicked(self, engine: str) -> None:
+        key = self._engine_controls[engine]["key"].text().strip()
+        if not key:
+            self._set_status(engine, "API key is empty", ok=False)
+            return
+
+        self._with_controls_enabled(engine, False)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            ok, message = _verify_api_key(engine, key)
+        finally:
+            QApplication.restoreOverrideCursor()
+            self._with_controls_enabled(engine, True)
+
+        if ok:
+            self._verified_keys[engine] = key
+            self._set_status(engine, "Verified", ok=True)
+        else:
+            self._verified_keys.pop(engine, None)
+            self._set_status(engine, message, ok=False)
+
+    def _on_fetch_clicked(self, engine: str) -> None:
+        key = self._engine_controls[engine]["key"].text().strip()
+        if not key:
+            self._set_status(engine, "Enter API key before fetching models", ok=False)
+            return
+
+        self._with_controls_enabled(engine, False)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            models = _fetch_models(engine, key)
+        except requests.RequestException as exc:
+            self._set_status(engine, f"Network error: {exc}", ok=False)
+            return
+        except RuntimeError as exc:
+            self._set_status(engine, str(exc), ok=False)
+            return
+        except Exception as exc:
+            self._set_status(engine, f"Unexpected error: {exc}", ok=False)
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+            self._with_controls_enabled(engine, True)
+
+        models = [m for m in models if m]
+        if not models:
+            self._set_status(engine, "No models returned", ok=False)
+            return
+
+        combo = self._engine_controls[engine]["model"]
+        current = combo.currentText().strip()
+        combo.clear()
+        combo.addItems(models)
+        if current:
+            self._set_model_value(engine, current)
+        self._set_status(engine, f"Fetched {len(models)} models", ok=True)
 
     def save_to(self, cfg: Config) -> None:
         if self._rb_deepl.isChecked():
@@ -345,15 +649,15 @@ class _EngineTab(QWidget):
 
         cfg.api_keys.deepl = self._deepl_key.text().strip()
         cfg.api_keys.openai = self._openai_key.text().strip()
-        cfg.api_keys.openai_model = self._openai_model.text().strip() or "gpt-4o-mini"
+        cfg.api_keys.openai_model = self._openai_model.currentText().strip() or _ENGINE_DEFAULT_MODELS["openai"]
         cfg.api_keys.anthropic = self._anthropic_key.text().strip()
-        cfg.api_keys.anthropic_model = self._anthropic_model.text().strip() or "claude-3-5-sonnet-latest"
+        cfg.api_keys.anthropic_model = self._anthropic_model.currentText().strip() or _ENGINE_DEFAULT_MODELS["anthropic"]
         cfg.api_keys.gemini = self._gemini_key.text().strip()
-        cfg.api_keys.gemini_model = self._gemini_model.text().strip() or "gemini-1.5-flash"
+        cfg.api_keys.gemini_model = self._gemini_model.currentText().strip() or _ENGINE_DEFAULT_MODELS["gemini"]
         cfg.api_keys.grok = self._grok_key.text().strip()
-        cfg.api_keys.grok_model = self._grok_model.text().strip() or "grok-2"
+        cfg.api_keys.grok_model = self._grok_model.currentText().strip() or _ENGINE_DEFAULT_MODELS["grok"]
         cfg.api_keys.openrouter = self._openrouter_key.text().strip()
-        cfg.api_keys.openrouter_model = self._openrouter_model.text().strip() or "google/gemini-2.5-flash"
+        cfg.api_keys.openrouter_model = self._openrouter_model.currentText().strip() or _ENGINE_DEFAULT_MODELS["openrouter"]
 
 
 # ---------------------------------------------------------------------------
@@ -439,11 +743,37 @@ class _HotkeysTab(QWidget):
         idx = lang_combo.findData(entry.lang)
         if idx >= 0:
             lang_combo.setCurrentIndex(idx)
+        lang_combo.currentIndexChanged.connect(
+            lambda _idx, combo=lang_combo: self._sync_label_with_language(combo)
+        )
         self._table.setCellWidget(row, _COL_LANG, lang_combo)
 
         shortcut_edit = HotkeyEdit()
         shortcut_edit.setKeySequence(QKeySequence(entry.shortcut))
         self._table.setCellWidget(row, _COL_SHORTCUT, shortcut_edit)
+
+    def _sync_label_with_language(self, combo: QComboBox) -> None:
+        row = self._find_row_for_widget(combo, _COL_LANG)
+        if row < 0:
+            return
+        # ISO 639-1 abbreviation (best-effort). For languages like zh-CN, this
+        # yields 'zh'. For multi-part tags like en-GB it yields 'en'.
+        lang_code = combo.currentData()
+        if isinstance(lang_code, str) and lang_code:
+            iso_639_1 = lang_code.split("-", 1)[0]
+        else:
+            iso_639_1 = (combo.currentText().strip() or "lang")[:2]
+        label_item = self._table.item(row, _COL_LABEL)
+        if label_item is None:
+            label_item = QTableWidgetItem()
+            self._table.setItem(row, _COL_LABEL, label_item)
+        label_item.setText(f"→ {iso_639_1}")
+
+    def _find_row_for_widget(self, widget: QWidget, column: int) -> int:
+        for row in range(self._table.rowCount()):
+            if self._table.cellWidget(row, column) is widget:
+                return row
+        return -1
 
     def _add_row(self) -> None:
         self._append_entry(HotkeyEntry("en", "ctrl+shift+3", "→ New"))
@@ -529,6 +859,8 @@ class HistoryCard(QWidget):
 
     def __init__(self, item: dict[str, str], parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setObjectName("historyCard")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         
         # Borderless, styled card
         layout = QVBoxLayout(self)
@@ -596,12 +928,12 @@ class HistoryCard(QWidget):
         
         # Border & background styling
         self.setStyleSheet(
-            "HistoryCard { "
+            "QWidget#historyCard { "
             "  background-color: #fcfcfc; "
             "  border: 1px solid #e5e5e5; "
             "  border-radius: 8px; "
             "} "
-            "HistoryCard:hover { "
+            "QWidget#historyCard:hover { "
             "  background-color: #f5faf0; "
             "  border: 1px solid #cde5ab; "
             "}"
