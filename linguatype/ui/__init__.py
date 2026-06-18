@@ -1,1 +1,1 @@
-"""PySide6 UI components."""
+"""CustomTkinter UI components."""

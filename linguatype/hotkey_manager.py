@@ -1,8 +1,8 @@
 """Global hotkey registration and dispatch.
 
 The ``keyboard`` library listens for key events from a background thread.
-To keep Qt happy, all callbacks are marshalled back to the Qt main thread
-via a ``QObject`` signal before any UI or application logic runs.
+To keep Tk happy, all callbacks are marshalled back to the Tk main thread
+via ``root.after()`` before any UI or application logic runs.
 """
 
 from __future__ import annotations
@@ -11,42 +11,27 @@ import logging
 import threading
 from typing import Callable
 
-from PySide6.QtCore import QObject, Signal
+import tkinter as tk
 
 log = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Qt bridge — emits signals on the main thread
-# ---------------------------------------------------------------------------
-
-class _HotkeyBridge(QObject):
-    """Thin QObject whose signal is connected to app logic on the main thread.
-
-    The ``keyboard`` callback fires on a non-Qt thread; emitting a queued
-    signal from there is safe and causes Qt to invoke the slot on the main
-    event-loop thread.
-    """
-
-    hotkey_triggered = Signal(str)   # target language code, e.g. "en"
-
-
-# ---------------------------------------------------------------------------
-# Manager
-# ---------------------------------------------------------------------------
 
 class HotkeyManager:
     """Registers and unregisters global hotkeys.
 
     Usage::
 
-        manager = HotkeyManager()
-        manager.bridge.hotkey_triggered.connect(my_slot)
+        manager = HotkeyManager(root, my_callback)
         manager.update([HotkeyEntry("en", "ctrl+shift+1", "→ English")])
     """
 
-    def __init__(self) -> None:
-        self.bridge = _HotkeyBridge()
+    def __init__(
+        self,
+        root: tk.Tk,
+        callback: Callable[[str], None],
+    ) -> None:
+        self._root = root
+        self._callback = callback
         self._registered: dict[str, str] = {}   # shortcut → lang
         self._enabled = True
         self._lock = threading.Lock()
@@ -93,7 +78,7 @@ class HotkeyManager:
 
             def _cb(lang_code: str = lang) -> None:
                 if self._enabled:
-                    self.bridge.hotkey_triggered.emit(lang_code)
+                    self._root.after(0, lambda lc=lang_code: self._callback(lc))
 
             with self._lock:
                 # Do not suppress key events globally.
