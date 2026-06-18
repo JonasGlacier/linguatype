@@ -293,6 +293,7 @@ class App:
     # ------------------------------------------------------------------
 
     def _open_settings(self, history_tab: bool = False) -> None:
+        self._hotkey_mgr.set_enabled(False)
         if self._settings_win is not None and self._settings_win.is_visible():
             self._settings_win.update_config(self._cfg)
             if history_tab:
@@ -301,7 +302,7 @@ class App:
                 self._settings_win.refresh_history()
             self._settings_win.show()
             return
-        self._settings_win = SettingsWindow(self._root, self._cfg, self._on_settings_saved)
+        self._settings_win = SettingsWindow(self._root, self._cfg, self._on_settings_saved, on_close=lambda: self._hotkey_mgr.set_enabled(True))
         if history_tab:
             self._settings_win.show_history_tab()
         self._settings_win.show()

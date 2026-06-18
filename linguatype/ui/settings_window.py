@@ -39,8 +39,19 @@ _ICON_PATH = _ASSETS / "icon.ico"
 def _set_window_icon(win: tk.Toplevel) -> None:
     if not _ICON_PATH.exists():
         return
+
+    def _apply() -> None:
+        try:
+            win.iconbitmap(str(_ICON_PATH))
+        except Exception:
+            pass
+
+    # CTkToplevel re-applies its own titlebar/icon ~200ms after creation
+    # (it withdraws and re-shows the window), which clears any icon set
+    # immediately. Apply now and again after that to make it stick.
+    _apply()
     try:
-        win.iconbitmap(str(_ICON_PATH))
+        win.after(300, _apply)
     except Exception:
         pass
 
@@ -256,24 +267,53 @@ def _format_timestamp(ts: str) -> str:
         return ts
 
 
-def _keysym_to_shortcut(event: tk.Event) -> str | None:
-    skip = {
-        "Control_L", "Control_R", "Shift_L", "Shift_R",
-        "Alt_L", "Alt_R", "Win_L", "Win_R", "Super_L", "Super_R",
-    }
-    if event.keysym in skip:
+_MODIFIER_MAP: dict[str, str] = {
+    "Control_L": "ctrl", "Control_R": "ctrl",
+    "Shift_L": "shift", "Shift_R": "shift",
+    "Alt_L": "alt", "Alt_R": "alt",
+    "Win_L": "win", "Win_R": "win",
+    "Super_L": "win", "Super_R": "win",
+}
+
+
+# Shift + 主键盘数字在 Tkinter 里会被记录成符号名称，需要还原为对应数字。
+_SHIFT_SYMBOL_MAP: dict[str, str] = {
+    "exclam": "1", "at": "2", "numbersign": "3", "dollar": "4",
+    "percent": "5", "asciicircum": "6", "ampersand": "7",
+    "asterisk": "8", "parenleft": "9", "parenright": "0",
+}
+
+# NumLock 关闭或 NumLock+Shift 时，小键盘方向键 keysym 会被记录成导航键名称，
+# 需要还原为对应的数字键。
+_KP_NAV_MAP: dict[str, str] = {
+    "kp_home": "7", "kp_up": "8", "kp_prior": "9",
+    "kp_left": "4", "kp_begin": "5", "kp_right": "6",
+    "kp_end": "1", "kp_down": "2", "kp_next": "3",
+    "kp_insert": "0", "kp_delete": ".",
+    "kp_0": "0", "kp_1": "1", "kp_2": "2", "kp_3": "3",
+    "kp_4": "4", "kp_5": "5", "kp_6": "6",
+    "kp_7": "7", "kp_8": "8", "kp_9": "9",
+}
+
+
+def _keysym_to_shortcut(event: tk.Event, modifiers: set[str]) -> str | None:
+    key = event.keysym.lower()
+    if key in {
+        "control_l", "control_r", "shift_l", "shift_r",
+        "alt_l", "alt_r", "win_l", "win_r", "super_l", "super_r",
+        "caps_lock", "num_lock", "scroll_lock",
+    }:
         return None
     parts: list[str] = []
-    state = event.state or 0
-    if state & 0x4:
-        parts.append("ctrl")
-    if state & 0x1:
-        parts.append("shift")
-    if state & 0x8 or state & 0x20000:
-        parts.append("alt")
-    if state & 0x40 or state & 0x80:
-        parts.append("win")
-    key = event.keysym.lower()
+    for mod in ("ctrl", "shift", "alt", "win"):
+        if mod in modifiers:
+            parts.append(mod)
+    if key in {"control", "shift", "alt", "win", "super"}:
+        return None
+    if key in _SHIFT_SYMBOL_MAP:
+        key = _SHIFT_SYMBOL_MAP[key]
+    elif key in _KP_NAV_MAP:
+        key = _KP_NAV_MAP[key]
     if len(key) == 1:
         parts.append(key)
     elif key.startswith("kp_"):
@@ -289,16 +329,26 @@ class HotkeyEntryWidget(ctk.CTkEntry):
     def __init__(self, master: Any, **kwargs: Any) -> None:
         super().__init__(master, **kwargs)
         self._shortcut = ""
-        self.bind("<KeyPress>", self._on_key)
+        self._pressed_modifiers: set[str] = set()
+        self.bind("<KeyPress>", self._on_keypress)
+        self.bind("<KeyRelease>", self._on_keyrelease)
         self.bind("<FocusIn>", lambda _e: self.configure(placeholder_text="Press keys…"))
+        self.bind("<FocusOut>", lambda _e: self._pressed_modifiers.clear())
 
-    def _on_key(self, event: tk.Event) -> str:
-        shortcut = _keysym_to_shortcut(event)
+    def _on_keypress(self, event: tk.Event) -> str:
+        if event.keysym in _MODIFIER_MAP:
+            self._pressed_modifiers.add(_MODIFIER_MAP[event.keysym])
+            return "break"
+        shortcut = _keysym_to_shortcut(event, self._pressed_modifiers)
         if shortcut:
             self._shortcut = shortcut
             self.delete(0, "end")
             self.insert(0, shortcut)
         return "break"
+
+    def _on_keyrelease(self, event: tk.Event) -> None:
+        if event.keysym in _MODIFIER_MAP:
+            self._pressed_modifiers.discard(_MODIFIER_MAP[event.keysym])
 
     def get_shortcut(self) -> str:
         return self._shortcut or self.get().strip().lower()
@@ -744,15 +794,17 @@ class SettingsWindow:
         root: tk.Tk,
         cfg: Config,
         on_save: Callable[[Config], None],
+        on_close: Callable[[], None] | None = None,
     ) -> None:
         self._root = root
         self._cfg = cfg
         self._on_save = on_save
+        self._on_close = on_close
 
         self._win = ctk.CTkToplevel(root)
         self._win.title("LinguaType - Settings")
         self._win.geometry("580x520")
-        self._win.minsize(520, 400)
+        self._win.minsize(520, 460)
         self._win.configure(fg_color=_BG_BASE)
         _set_window_icon(self._win)
 
@@ -791,13 +843,13 @@ class SettingsWindow:
             fg_color=_NEUTRAL_BTN,
             hover_color=_NEUTRAL_BTN_HOVER,
             text_color=_TEXT_PRIMARY,
-            command=self._win.destroy,
+            command=self._close,
         ).pack(side="right", padx=(8, 0))
         ctk.CTkButton(btn_row, text="OK", width=100, fg_color=_THEME, hover_color=_THEME_HOVER, command=self._save).pack(
             side="right",
         )
 
-        self._win.protocol("WM_DELETE_WINDOW", self._win.destroy)
+        self._win.protocol("WM_DELETE_WINDOW", self._close)
 
     @property
     def win(self) -> ctk.CTkToplevel:
@@ -832,4 +884,9 @@ class SettingsWindow:
         save_config(self._cfg)
         set_autostart(self._cfg.autostart)
         self._on_save(self._cfg)
+        self._close()
+
+    def _close(self) -> None:
         self._win.destroy()
+        if self._on_close is not None:
+            self._on_close()
