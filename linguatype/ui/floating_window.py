@@ -39,7 +39,7 @@ _COLORS = {
     "title": "#f5f7ff",
     "text": "#d3d9e8",
     "muted": "#9aa2b8",
-    "success": "#5dd39e",
+    "success": "#79a92a",
     "error": "#ff6b6b",
 }
 

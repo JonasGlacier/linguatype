@@ -70,8 +70,15 @@ def _confirm_long_text(root: tk.Tk, char_count: int) -> bool:
     def _no() -> None:
         dlg.destroy()
 
-    ctk.CTkButton(btn_row, text="Yes", width=80, command=_yes).pack(side="right", padx=(8, 0))
-    ctk.CTkButton(btn_row, text="No", width=80, fg_color="gray40", command=_no).pack(side="right")
+    ctk.CTkButton(btn_row, text="Yes", width=80, fg_color="#79A92A", hover_color="#6C9626", command=_yes).pack(side="right", padx=(8, 0))
+    ctk.CTkButton(btn_row, text="No", width=80, fg_color="#ADA576", hover_color="#A8A292", command=_no).pack(side="right")
+
+    dlg.update_idletasks()
+    w, h = dlg.winfo_width(), dlg.winfo_height()
+    x = (dlg.winfo_screenwidth() - w) // 2
+    y = (dlg.winfo_screenheight() - h) // 2
+    dlg.geometry(f"+{x}+{y}")
+
     dlg.wait_window()
     return result["value"]
 
