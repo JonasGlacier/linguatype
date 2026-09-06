@@ -3,7 +3,6 @@
 Tab 1 – Engine    : choose engine, enter API keys
 Tab 2 – Hotkeys   : manage (label, target lang, shortcut) pairs
 Tab 3 – General   : max-chars threshold, autostart toggle
-Tab 4 – History   : read-only list of recent translations
 """
 
 from __future__ import annotations
@@ -11,7 +10,6 @@ from __future__ import annotations
 import threading
 import webbrowser
 from collections.abc import Callable
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +17,7 @@ import customtkinter as ctk
 import requests
 import tkinter as tk
 
-from linguatype.config import Config, HotkeyEntry, save_config, set_autostart, clear_history
+from linguatype.config import Config, HotkeyEntry, save_config, set_autostart
 
 _THEME = "#79A92A"
 _BG_BASE = "#F4F4EF"
@@ -209,62 +207,6 @@ def _verify_api_key(engine: str, api_key: str) -> tuple[bool, str]:
         return False, str(exc)
     except Exception as exc:
         return False, f"Unexpected error: {exc}"
-
-
-def _confirm(parent: tk.Misc, title: str, message: str) -> bool:
-    result = {"value": False}
-
-    dlg = ctk.CTkToplevel(parent)
-    dlg.title(title)
-    dlg.configure(fg_color=_BG_BASE)
-    _set_window_icon(dlg)
-    dlg.transient(parent)
-    dlg.grab_set()
-    dlg.resizable(False, False)
-
-    ctk.CTkLabel(dlg, text=message, wraplength=360, justify="left", text_color=_TEXT_PRIMARY).pack(
-        padx=20, pady=(20, 12), anchor="w",
-    )
-    btn_row = ctk.CTkFrame(dlg, fg_color="transparent")
-    btn_row.pack(padx=20, pady=(0, 20), fill="x")
-
-    def _yes() -> None:
-        result["value"] = True
-        dlg.destroy()
-
-    def _no() -> None:
-        dlg.destroy()
-
-    ctk.CTkButton(
-        btn_row,
-        text="Yes",
-        width=80,
-        fg_color=_THEME,
-        hover_color=_THEME_HOVER,
-        command=_yes,
-    ).pack(
-        side="right", padx=(8, 0),
-    )
-    ctk.CTkButton(
-        btn_row,
-        text="No",
-        width=80,
-        fg_color=_NEUTRAL_BTN,
-        hover_color=_NEUTRAL_BTN_HOVER,
-        text_color=_TEXT_PRIMARY,
-        command=_no,
-    ).pack(side="right")
-    dlg.wait_window()
-    return result["value"]
-
-
-def _format_timestamp(ts: str) -> str:
-    if not ts:
-        return ""
-    try:
-        return datetime.fromisoformat(ts).strftime("%b %d, %Y  %H:%M")
-    except ValueError:
-        return ts
 
 
 _MODIFIER_MAP: dict[str, str] = {
@@ -722,72 +664,8 @@ class _GeneralTab(ctk.CTkFrame):
         cfg.autostart = bool(self._autostart.get())
 
 
-class _HistoryTab(ctk.CTkFrame):
-    def __init__(self, master: Any, cfg: Config, root: tk.Tk) -> None:
-        super().__init__(master, fg_color="transparent")
-        self._cfg = cfg
-        self._app_root = root
-        header = ctk.CTkFrame(self, fg_color="transparent")
-        header.pack(fill="x", padx=16, pady=(16, 8))
-        ctk.CTkLabel(header, text="Recent translations, newest first (read-only).",
-                     text_color=_TEXT_MUTED).pack(side="left")
-        self._clear_btn = ctk.CTkButton(header, text="Clear All", width=80, fg_color=_DANGER, hover_color="#9A3131",
-                                        command=self._clear_all)
-        self._clear_btn.pack(side="right")
-        self._scroll = ctk.CTkScrollableFrame(self, fg_color=_BG_PANEL)
-        self._scroll.pack(fill="both", expand=True, padx=16, pady=(0, 16))
-        self.reload(cfg)
-
-    def _clear_all(self) -> None:
-        if not self._cfg.translation_history:
-            return
-        if not _confirm(self._app_root, "LinguaType — Clear History",
-                        "Delete all translation history?\nThis action cannot be undone."):
-            return
-        clear_history(self._cfg)
-        save_config(self._cfg)
-        self.reload(self._cfg)
-
-    def reload(self, cfg: Config) -> None:
-        self._cfg = cfg
-        for child in self._scroll.winfo_children():
-            child.destroy()
-        self._clear_btn.configure(state="normal" if cfg.translation_history else "disabled")
-        if not cfg.translation_history:
-            ctk.CTkLabel(self._scroll, text="No translations yet.", text_color=_TEXT_MUTED).pack(pady=20)
-            return
-        for item in reversed(cfg.translation_history[-50:]):
-            self._add_card(item)
-
-    def _add_card(self, item: dict[str, str]) -> None:
-        card = ctk.CTkFrame(self._scroll, fg_color=_BG_BASE, border_width=1, border_color=_BORDER_SOFT)
-        card.pack(fill="x", pady=6, padx=4)
-        header = ctk.CTkFrame(card, fg_color="transparent")
-        header.pack(fill="x", padx=12, pady=(8, 4))
-        lang_code = item.get("lang", "")
-        lang_name = _LANG_CODE_TO_NAME.get(lang_code, lang_code.upper())
-        ctk.CTkLabel(header, text=f"{lang_name} ({lang_code.upper()})",
-                     fg_color=_THEME, corner_radius=4, padx=6).pack(side="left")
-        ts = _format_timestamp(item.get("timestamp", ""))
-        if ts:
-            ctk.CTkLabel(header, text=ts, text_color=_TEXT_MUTED, font=ctk.CTkFont(size=11)).pack(side="right")
-        body = ctk.CTkFrame(card, fg_color="transparent")
-        body.pack(fill="x", padx=12, pady=(0, 8))
-        src_frame = ctk.CTkFrame(body, fg_color="transparent")
-        src_frame.pack(side="left", fill="both", expand=True)
-        ctk.CTkLabel(src_frame, text="SOURCE", font=ctk.CTkFont(size=9, weight="bold"),
-                     text_color=_TEXT_MUTED).pack(anchor="w")
-        ctk.CTkLabel(src_frame, text=item.get("source", ""), wraplength=200, justify="left").pack(anchor="w")
-        ctk.CTkLabel(body, text="→", font=ctk.CTkFont(size=18), text_color=_TEXT_MUTED).pack(side="left", padx=8)
-        res_frame = ctk.CTkFrame(body, fg_color="transparent")
-        res_frame.pack(side="left", fill="both", expand=True)
-        ctk.CTkLabel(res_frame, text="TRANSLATION", font=ctk.CTkFont(size=9, weight="bold"),
-                     text_color=_THEME).pack(anchor="w")
-        ctk.CTkLabel(res_frame, text=item.get("result", ""), wraplength=200, justify="left").pack(anchor="w")
-
-
 class SettingsWindow:
-    """Four-tab settings dialog. Calls on_save after the user clicks OK."""
+    """Three-tab settings dialog. Calls on_save after the user clicks OK."""
 
     def __init__(
         self,
@@ -821,8 +699,7 @@ class SettingsWindow:
         self._tabs.add("Engine")
         self._tabs.add("Hotkeys")
         self._tabs.add("General")
-        self._tabs.add("History")
-        for tab_name in ("Engine", "Hotkeys", "General", "History"):
+        for tab_name in ("Engine", "Hotkeys", "General"):
             self._tabs.tab(tab_name).configure(fg_color=_BG_PANEL)
 
         self._engine_tab = _EngineTab(self._tabs.tab("Engine"), cfg, root)
@@ -831,8 +708,6 @@ class SettingsWindow:
         self._hotkeys_tab.pack(fill="both", expand=True)
         self._general_tab = _GeneralTab(self._tabs.tab("General"), cfg)
         self._general_tab.pack(fill="both", expand=True)
-        self._history_tab = _HistoryTab(self._tabs.tab("History"), cfg, root)
-        self._history_tab.pack(fill="both", expand=True)
 
         btn_row = ctk.CTkFrame(self._win, fg_color="transparent")
         btn_row.pack(fill="x", padx=12, pady=(0, 12))
@@ -866,16 +741,8 @@ class SettingsWindow:
         self._win.lift()
         self._win.focus_force()
 
-    def show_history_tab(self) -> None:
-        self._history_tab.reload(self._cfg)
-        self._tabs.set("History")
-
-    def refresh_history(self) -> None:
-        self._history_tab.reload(self._cfg)
-
     def update_config(self, cfg: Config) -> None:
         self._cfg = cfg
-        self.refresh_history()
 
     def _save(self) -> None:
         self._engine_tab.save_to(self._cfg)

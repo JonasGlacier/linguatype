@@ -11,7 +11,6 @@ import os
 import sys
 import winreg
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -79,7 +78,6 @@ class Config:
     ])
     max_chars_confirm: int = 500
     autostart: bool = False
-    translation_history: list[dict[str, str]] = field(default_factory=list)
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> "Config":
@@ -91,7 +89,6 @@ class Config:
             cfg.hotkeys = [HotkeyEntry.from_dict(h) for h in d["hotkeys"]]
         cfg.max_chars_confirm = d.get("max_chars_confirm", 500)
         cfg.autostart = d.get("autostart", False)
-        cfg.translation_history = d.get("translation_history", [])
         return cfg
 
     def to_dict(self) -> dict[str, Any]:
@@ -101,7 +98,6 @@ class Config:
             "hotkeys": [asdict(h) for h in self.hotkeys],
             "max_chars_confirm": self.max_chars_confirm,
             "autostart": self.autostart,
-            "translation_history": self.translation_history[-50:],  # keep last 50
         }
 
 
@@ -121,7 +117,12 @@ def load_config() -> Config:
     if path.exists():
         try:
             with open(path, encoding="utf-8") as f:
-                return Config.from_dict(json.load(f))
+                data = json.load(f)
+            cfg = Config.from_dict(data)
+            if isinstance(data, dict) and "translation_history" in data:
+                # Remove legacy translation text from disk during upgrade.
+                save_config(cfg)
+            return cfg
         except Exception:
             pass
     return Config()
@@ -181,26 +182,3 @@ def get_autostart() -> bool:
             return False
     except OSError:
         return False
-
-
-# ---------------------------------------------------------------------------
-# History helpers
-# ---------------------------------------------------------------------------
-
-_MAX_HISTORY = 50
-
-
-def add_history(cfg: Config, source: str, result: str, lang: str) -> None:
-    cfg.translation_history.append({
-        "source": source[:200],
-        "result": result[:200],
-        "lang": lang,
-        "timestamp": datetime.now().isoformat(timespec="seconds"),
-    })
-    if len(cfg.translation_history) > _MAX_HISTORY:
-        cfg.translation_history = cfg.translation_history[-_MAX_HISTORY:]
-
-
-def clear_history(cfg: Config) -> None:
-    """Remove all translation history entries."""
-    cfg.translation_history = []

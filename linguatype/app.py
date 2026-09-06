@@ -22,7 +22,7 @@ import pystray
 import tkinter as tk
 from PIL import Image, ImageDraw
 
-from linguatype.config import Config, load_config, save_config, add_history
+from linguatype.config import Config, load_config
 from linguatype.hotkey_manager import HotkeyManager
 from linguatype.text_handler import TextHandler, TextResult
 from linguatype.translators.base import TranslationError
@@ -98,7 +98,6 @@ class App:
 
         self._executor = ThreadPoolExecutor(max_workers=2)
         self._pending_result: Optional[TextResult] = None
-        self._pending_lang: str = "en"
 
         self._tray_icon: Optional[pystray.Icon] = None
         self._build_tray()
@@ -170,7 +169,6 @@ class App:
         log.info("Translating %d chars → %s (read: %s)", len(text), target_lang, result.method)
 
         self._pending_result = result
-        self._pending_lang = target_lang
 
         translator = self._translator
         self._executor.submit(self._run_translation, text, target_lang, translator, result)
@@ -194,11 +192,6 @@ class App:
         ok = self._text_handler.set_text(translated, original)
         if ok:
             self._floating.show_success(translated)
-            add_history(self._cfg, original.text, translated, self._pending_lang)
-            save_config(self._cfg)
-            self._update_tray_menu()
-            if self._settings_win is not None and self._settings_win.is_visible():
-                self._settings_win.refresh_history()
         else:
             self._floating.show_error("Could not write text back to the control.")
 
@@ -264,10 +257,6 @@ class App:
             items.append(pystray.Menu.SEPARATOR)
 
         items.append(pystray.MenuItem(
-            "History…", lambda _i, _it: self._post(self._show_history),
-        ))
-        items.append(pystray.Menu.SEPARATOR)
-        items.append(pystray.MenuItem(
             "Settings…",
             lambda _i, _it: self._post(self._open_settings),
             default=True,
@@ -299,28 +288,19 @@ class App:
     # Settings
     # ------------------------------------------------------------------
 
-    def _open_settings(self, history_tab: bool = False) -> None:
+    def _open_settings(self) -> None:
         self._hotkey_mgr.set_enabled(False)
         if self._settings_win is not None and self._settings_win.is_visible():
             self._settings_win.update_config(self._cfg)
-            if history_tab:
-                self._settings_win.show_history_tab()
-            else:
-                self._settings_win.refresh_history()
             self._settings_win.show()
             return
         self._settings_win = SettingsWindow(self._root, self._cfg, self._on_settings_saved, on_close=lambda: self._hotkey_mgr.set_enabled(True))
-        if history_tab:
-            self._settings_win.show_history_tab()
         self._settings_win.show()
 
     def _on_settings_saved(self, cfg: Config) -> None:
         self._cfg = cfg
         self._apply_config()
         log.info("Settings saved.")
-
-    def _show_history(self) -> None:
-        self._open_settings(history_tab=True)
 
     # ------------------------------------------------------------------
     # Utilities
